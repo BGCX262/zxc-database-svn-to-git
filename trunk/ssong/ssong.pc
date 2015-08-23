@@ -1,0 +1,116 @@
+#include <stdio.h>
+#include <sqlca.h>
+#include<stdlib.h>
+#include <sqlda.h>
+#include <sqlcpr.h>
+#include <string.h>
+
+#define NAME_LENGTH     128
+
+void sql_error()
+{
+    char errMsg[128];
+    int bufLen, msgLen;
+    bufLen = sizeof(errMsg);
+    sqlglm(errMsg, &bufLen, &msgLen);
+    printf("TEST: %s\n", errMsg);
+}
+
+void help()
+{
+    printf("Usage: ssong {-artist ArtistName | -album AlbumName | -title TitileKeyWord}\n");
+}
+
+void trim(char *str, int len)
+{
+    int i = len - 2;
+    while(str[i] == ' ')
+        --i;
+    str[i+1] = 0;
+}
+
+int main(int argc,char*argv[])
+{
+    char user[] = "student@210.30.98.114:2003/dbdesign.zxc-pc";
+    char passwd[] = "111111";
+    char title[NAME_LENGTH];
+    char albumName[NAME_LENGTH];
+    char artistName[NAME_LENGTH];
+    int songId;
+    sql_cursor search_cursor;
+
+    if(argc!=3)
+    {
+        help();
+        return 0;
+    }
+
+    EXEC SQL WHENEVER SQLERROR DO sql_error();
+    EXEC SQL CONNECT :user IDENTIFIED BY :passwd;
+    EXEC SQL ALLOCATE:search_cursor;
+    if(!strcmp("-artist", argv[1]))
+    {
+        strcpy(artistName, argv[2]);
+        trim(artistName, NAME_LENGTH);
+        EXEC SQL EXECUTE
+            begin
+                select_by_artist(:search_cursor, :artistName);
+            end;
+        END-EXEC;
+        EXEC SQL WHENEVER NOT FOUND DO break;
+        for(;;)
+        {
+            EXEC SQL FETCH:search_cursor into :songId, :title, :albumName;
+            trim(title, NAME_LENGTH);
+            trim(albumName, NAME_LENGTH);
+            printf("%d\t%s\t%s\t%s\n", songId, title, albumName, artistName);
+        }
+    }
+    else if(!strcmp("-album", argv[1]))
+    {
+        strcpy(albumName, argv[2]);
+        trim(albumName, NAME_LENGTH);
+        EXEC SQL WHENEVER NOT FOUND CONTINUE;
+        EXEC SQL EXECUTE
+            begin
+                select_by_album(:search_cursor, :albumName);
+            end;
+        END-EXEC;
+        EXEC SQL WHENEVER NOT FOUND DO break;
+        for(;;)
+        {
+            EXEC SQL FETCH:search_cursor into :songId, :title, :artistName;
+            trim(title, NAME_LENGTH);
+            trim(artistName, NAME_LENGTH);
+            printf("%d\t%s\t%s\t%s\n", songId, title, albumName, artistName);
+        }
+    }
+    else if(!strcmp("-title", argv[1]))
+    {
+        strcpy(title, argv[2]);
+        trim(title, NAME_LENGTH);
+        EXEC SQL WHENEVER NOT FOUND CONTINUE;
+        EXEC SQL EXECUTE
+            begin
+                select_by_title(:search_cursor, :title);
+            end;
+        END-EXEC;
+        EXEC SQL WHENEVER NOT FOUND DO break;
+        for(;;)
+        {
+            EXEC SQL FETCH:search_cursor into :songId, :title, :artistName, :albumName;
+            trim(title, NAME_LENGTH);
+            trim(albumName, NAME_LENGTH);
+            trim(artistName, NAME_LENGTH);
+            printf("%d\t%s\t%s\t%s\n", songId, title, albumName, artistName);
+        }
+    }
+    else
+    {
+        printf("error!");
+        return 0;
+    }
+    EXEC SQL CLOSE:search_cursor;
+    EXEC SQL COMMIT WORK RELEASE;
+    return 0;
+}

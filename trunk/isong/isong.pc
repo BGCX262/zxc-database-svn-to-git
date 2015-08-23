@@ -1,0 +1,238 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <sqlca.h>
+#include <sqlda.h>
+#include <sqlcpr.h>
+#include <oci.h>
+
+#define MAX_NAME_LENGTH     128
+#define MAXBUFLEN           4096
+
+char User[] = "student@210.30.98.114:2003/dbdesign.zxc-pc";
+char Passwd[] = "111111";
+
+unsigned int LastArtistId;
+unsigned int LastAlbumId;
+char LastArtistName[MAX_NAME_LENGTH];
+char LastAlbumName[MAX_NAME_LENGTH];
+
+unsigned char buffer[MAXBUFLEN];
+EXEC SQL VAR buffer IS RAW(MAXBUFLEN);
+
+void help();
+void sql_error();
+unsigned int getAlbumId(char *albumName);
+unsigned int getArtistId(char *artistName);
+void insertAudioFile(FILE *audioFile, OCIBlobLocator *blob);
+
+int main(int argc, char *argv[])
+{
+    char path[MAX_NAME_LENGTH];
+    char title[MAX_NAME_LENGTH];
+    char albumName[MAX_NAME_LENGTH];
+    char artistName[MAX_NAME_LENGTH];
+    unsigned int artistId;
+    unsigned int albumId;
+
+    OCIBlobLocator *blob;
+    FILE *audioFile;
+
+    if(argc > 1)
+    {
+        help();
+        return 0;
+    }
+
+    EXEC SQL WHENEVER SQLERROR DO sql_error();
+    // connect to database
+    EXEC SQL CONNECT :User IDENTIFIED BY :Passwd;
+    // allocate blob
+    EXEC SQL ALLOCATE :blob;
+
+    while(1)
+    {
+        // get path, title, album, artist
+        if(gets(path) == NULL)
+            break;
+        if(gets(title) == NULL)
+            break;
+        if(gets(albumName) == NULL)
+            break;
+        if(gets(artistName) == NULL)
+            break;
+        sqlca.sqlcode = 0;
+        // get album id and artist id
+        if(strcmp(LastAlbumName, albumName) == 0 &&
+           strcmp(LastArtistName, artistName) == 0)
+        {
+            albumId = LastAlbumId;
+            artistId = LastArtistId;
+        }
+        else
+        {
+            albumId = getAlbumId(albumName);
+            if(sqlca.sqlcode < 0)
+            {
+                LastAlbumName[0] = 0;
+                continue;
+            }
+            artistId = getArtistId(artistName);
+            if(sqlca.sqlcode < 0)
+            {
+                LastArtistName[0] = 0;
+                continue;
+            }
+            LastAlbumId = albumId;
+            LastArtistId = artistId;
+            strcpy(LastAlbumName, albumName);
+            strcpy(LastArtistName, artistName);
+        }
+
+        // open audio file
+        audioFile = fopen(path, "rb");
+        if(audioFile == NULL)
+        {
+            printf("Can't open file %s\n", path);
+            continue;
+        }
+
+        // insert a empty blob and get the blob locator
+        EXEC SQL INSERT INTO song (name, data, albumid, artistid)
+                VALUES (:title, EMPTY_BLOB(), :albumId, :artistId)
+                RETURNING data INTO :blob;
+        if(sqlca.sqlcode < 0)
+        {
+            EXEC SQL LOB CLOSE :blob;
+            fclose(audioFile);
+            continue;
+        }
+
+        // insert audio file into blob
+        insertAudioFile(audioFile, blob);
+        // if success then commit, else rollback
+        if(sqlca.sqlcode >= 0)
+        {
+            EXEC SQL COMMIT WORK;
+            printf("file:%s, title:%s, artist:%s, album:%s success\n", path, title, artistName, albumName);
+        }
+        else
+        {
+            EXEC SQL ROLLBACK WORK;
+        }
+    }
+
+    // free allocate
+    EXEC SQL FREE :blob;
+    // disconnect
+    EXEC SQL COMMIT WORK RELEASE;
+    return 0;
+}
+
+void help()
+{
+    printf("Usage: isong\n");
+    printf("Read from stdin\n");
+    printf("Format: filepath title album artist\n");
+}
+
+void sql_error()
+{
+        char errMsg[128];
+        int bufLen, msgLen;
+        bufLen = sizeof(errMsg);
+        sqlglm(errMsg, &bufLen, &msgLen);
+        printf("isong: %s\n", errMsg);
+}
+
+unsigned int getAlbumId(char *albumName)
+{
+    unsigned int albumId = -1;
+    short indicator;
+
+    EXEC SQL SELECT id
+            INTO :albumId INDICATOR :indicator
+            FROM album
+            WHERE name = :albumName;
+    if(sqlca.sqlcode == 1403)
+    {
+        EXEC SQL INSERT INTO album (name) VALUES (:albumName)
+                RETURNING id INTO :albumId;
+    }
+    return albumId;
+}
+
+unsigned int getArtistId(char *artistName)
+{
+    unsigned int artistId = -1;
+    short indicator;
+
+    EXEC SQL SELECT id
+            INTO :artistId INDICATOR :indicator
+            FROM artist
+            WHERE name = :artistName;
+    if(sqlca.sqlcode == 1403)
+    {
+        EXEC SQL INSERT INTO artist (name) VALUES (:artistName)
+                RETURNING id INTO :artistId;
+    }
+    return artistId;
+}
+
+void insertAudioFile(FILE *audioFile, OCIBlobLocator *blob)
+{
+    unsigned int amt, offset = 1;
+    unsigned fileLen, remainder, nbytes;
+    int last;
+
+    fseek(audioFile, 0L, SEEK_END);
+    fileLen = (unsigned int)ftell(audioFile);
+    amt = fileLen;
+
+    if(fileLen > MAXBUFLEN)
+        nbytes = MAXBUFLEN;
+    else
+        nbytes = fileLen;
+
+    fseek(audioFile, 0L, SEEK_SET);
+    fread(buffer, nbytes, 1, audioFile);
+    remainder = fileLen - nbytes;
+
+    if(remainder == 0)
+    {
+        EXEC SQL LOB WRITE ONE :amt
+                FROM :buffer INTO :blob AT :offset;
+    }
+    else
+    {
+        EXEC SQL LOB WRITE FIRST :amt
+                FROM :buffer INTO :blob AT :offset;
+        last = 0;
+        EXEC SQL WHENEVER SQLERROR DO break;
+        do
+        {
+            if (remainder > MAXBUFLEN)
+                nbytes = MAXBUFLEN;
+            else
+            {
+                nbytes = remainder;
+                last = 1;
+            }
+            if(fread(buffer, nbytes, 1, audioFile) != 1)
+                last = 1;
+            if(last)
+            {
+                EXEC SQL LOB WRITE LAST :amt
+                        FROM :buffer INTO :blob;
+            }
+            else
+            {
+                EXEC SQL LOB WRITE NEXT :amt
+                        FROM :buffer INTO :blob;
+            }
+            remainder -= nbytes;
+        }while(!last && !feof(audioFile));
+        EXEC SQL WHENEVER SQLERROR DO sql_error();
+    }
+}

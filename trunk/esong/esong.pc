@@ -1,0 +1,121 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <sqlca.h>
+#include <sqlda.h>
+#include <sqlcpr.h>
+#include <oci.h>
+
+#define MAX_NAME_LENGTH     128
+#define MAXBUFLEN           4096
+
+char User[] = "student@210.30.98.114:2003/dbdesign.zxc-pc";
+char Passwd[] = "111111";
+
+unsigned char buffer[MAXBUFLEN];
+EXEC SQL VAR buffer IS RAW(MAXBUFLEN);
+
+void help();
+void sql_error();
+
+int main(int argc, char *argv[])
+{
+    OCIBlobLocator *blob;
+    FILE *audioFile;
+    unsigned int amt, offset = 1;
+    unsigned int songId;
+    char title[MAX_NAME_LENGTH];
+    char artistName[MAX_NAME_LENGTH];
+    char filename[MAX_NAME_LENGTH];
+    int i;
+
+    if(argc != 2)
+    {
+        help();
+        return 0;
+    }
+
+    sscanf(argv[1], "%u", &songId);
+
+    EXEC SQL WHENEVER SQLERROR DO sql_error();
+    // connect to database
+    EXEC SQL CONNECT :User IDENTIFIED BY :Passwd;
+
+    // allocate blob
+    EXEC SQL ALLOCATE :blob;
+    // GET lob
+    EXEC SQL EXECUTE
+        begin
+            select_by_songid(:songId, :title, :artistName, :blob);
+        end;
+    END-EXEC;
+    if(sqlca.sqlcode == 1403)
+    {
+        printf("Can't find any song with id %d\n", songId);
+        // disconnect
+        EXEC SQL COMMIT WORK RELEASE;
+        return 0;
+    }
+
+    // open file
+    i = MAX_NAME_LENGTH - 2;
+    while(i >= 0 && artistName[i] == ' ')
+        --i;
+    artistName[i+1] = 0;
+
+    i = MAX_NAME_LENGTH - 2;
+    while(i >=0 && title[i] == ' ')
+        --i;
+    title[i+1] = 0;
+    sprintf(filename, "%s-%s.mp3", artistName, title);
+    audioFile = fopen(filename, "wb");
+    if(audioFile == NULL)
+    {
+        printf("Can't open file %s\n", filename);
+        perror("");
+        // disconnect
+        EXEC SQL COMMIT WORK RELEASE;
+        return 0;
+    }
+
+    // open lob
+    EXEC SQL LOB OPEN :blob;
+    // read lob from database
+    EXEC SQL WHENEVER NOT FOUND GOTO end_of_lob;
+    amt = ~0U;
+    EXEC SQL LOB READ :amt FROM :blob AT :offset INTO :buffer;
+    fwrite(buffer, MAXBUFLEN, 1, audioFile);
+    EXEC SQL WHENEVER NOT FOUND DO break;
+    while(1)
+    {
+        EXEC SQL LOB READ :amt FROM :blob INTO :buffer;
+        fwrite(buffer, MAXBUFLEN, 1, audioFile);
+    }
+
+end_of_lob:
+    fwrite(buffer, amt, 1, audioFile);
+    // close blob
+    EXEC SQL LOB CLOSE :blob;
+    // free allocate
+    EXEC SQL FREE :blob;
+    // close file
+    fclose(audioFile);
+    // disconnect
+    EXEC SQL COMMIT WORK RELEASE;
+    return 0;
+}
+
+void help()
+{
+    printf("Usage: esong songId\n");
+}
+
+void sql_error()
+{
+        char errMsg[128];
+        int bufLen, msgLen;
+        bufLen = sizeof(errMsg);
+        sqlglm(errMsg, &bufLen, &msgLen);
+        printf("isong: %s\n", errMsg);
+}
